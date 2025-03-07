@@ -1,5 +1,15 @@
 #!/bin/bash
 
+# --- Start of Argument Handling Section ---
+# Check if script is called with arguments (node mode)
+if [[ $# -gt 0 ]]; then
+    echo "🔄 Starting node with parameters: $@"
+    exec ~/gaianet/bin/gaianet start "$@"
+    exit 0
+fi
+# --- End of Argument Handling Section ---
+
+# Original script content below with node initialization fixes
 # Function to detect GPU
 detect_gpu() {
     if command -v nvidia-smi &>/dev/null; then
@@ -65,22 +75,17 @@ case $model_choice in
     *) echo "❌ Invalid choice. Exiting..." && exit 1 ;;
 esac
 
-# Run multiple nodes (3 nodes as example)
+# Fixed Node Initialization Section
 for i in {1..3}; do
     mkdir -p ~/gaianet_node_$i
     cd ~/gaianet_node_$i
-    curl -O https://raw.githubusercontent.com/Debrajkhanra88/Gaia/main/gaiamulty.sh
-    chmod +x gaiamulty.sh
-    ./gaiamulty.sh --port=$((8080 + i)) --data-dir=~/gaianet_node_$i
-
-    # Start each node inside a screen session
-    screen -dmS gaianet_node_$i ~/gaianet/bin/gaianet start --data-dir=~/gaianet_node_$i
     ~/gaianet/bin/gaianet init --config "$model_url"
+    screen -dmS gaianet_node_$i ~/gaianet/bin/gaianet start --port=$((8080 + i)) --data-dir=~/gaianet_node_$i
 done
 
 echo "✅ Multiple GaiaNet Nodes Installed & Running Successfully!"
 
-# Node Management Menu
+# Node Management Menu (Remains Unchanged)
 while true; do
     echo "==================================="
     echo "🔍 GaiaNet Node Management Menu"
