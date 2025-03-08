@@ -1,74 +1,128 @@
 #!/bin/bash
-
-set -euo pipefail
+set -eo pipefail
 
 # --- Configuration ---
-INSTALL_DIR="$HOME/gaianet"
+INSTALL_DIR="${GAIA_INSTALL_DIR:-$HOME/gaianet}"
 NODE_BASE_DIR="$INSTALL_DIR/nodes"
 LOG_FILE="$INSTALL_DIR/installation.log"
+REPO_URL="https://github.com/Debrajkhanra88/Gaia.git"
+REPO_DIR="$INSTALL_DIR/repo"
+NODE_COUNT=3
+BASE_PORT=8080
 
-# --- Safe Directory Management ---
-change_directory() {
-    local target_dir="$1"
-    if ! cd "$target_dir"; then
-        echo "ERROR: Failed to change to directory: $target_dir" | tee -a "$LOG_FILE"
+# --- Text Colors ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# --- Logging System ---
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    local log_entry="[$timestamp] [$level] $message"
+    
+    case "$level" in
+        "ERROR") echo -e "${RED}$log_entry${NC}" ;;
+        "WARN")  echo -e "${YELLOW}$log_entry${NC}" ;;
+        "INFO")  echo -e "${GREEN}$log_entry${NC}" ;;
+        *)       echo "$log_entry" ;;
+    esac
+    
+    echo "$log_entry" >> "$LOG_FILE"
+}
+
+# --- Cleanup Handler ---
+cleanup() {
+    log "WARN" "Cleaning up after error..."
+    # Add any necessary cleanup operations here
+    exit 1
+}
+
+# --- Dependency Check ---
+check_dependencies() {
+    local dependencies=("git" "curl" "jq" "tee")
+    local missing=()
+    
+    for dep in "${dependencies[@]}"; do
+        if ! command -v "$dep" &>/dev/null; then
+            missing+=("$dep")
+        fi
+    done
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        log "ERROR" "Missing required dependencies: ${missing[*]}"
         exit 1
     fi
 }
 
-# --- Fixed Installation Function ---
-install_gaianet() {
-    # Create installation directory
-    mkdir -p "$INSTALL_DIR" || exit 1
-    
-    # Clone repository safely
-    echo "Cloning GaiaNet repository..."
-    if ! git clone https://github.com/Debrajkhanra88/Gaia.git "$INSTALL_DIR/repo"; then
-        echo "ERROR: Failed to clone repository" | tee -a "$LOG_FILE"
+# --- Directory Management ---
+safe_create_dir() {
+    local dir_path="$1"
+    log "INFO" "Creating directory: $dir_path"
+    if ! mkdir -p "$dir_path"; then
+        log "ERROR" "Failed to create directory: $dir_path"
         exit 1
     fi
+}
 
-    # Change to repo directory with error checking
-    change_directory "$INSTALL_DIR/repo"
-    
-    # Install dependencies
-    echo "Installing dependencies..."
-    chmod +x *.sh || {
-        echo "ERROR: Failed to make scripts executable" | tee -a "$LOG_FILE"
+# --- Repository Management ---
+clone_repository() {
+    log "INFO" "Cloning repository from $REPO_URL"
+    if ! git clone "$REPO_URL" "$REPO_DIR"; then
+        log "ERROR" "Failed to clone repository"
         exit 1
-    }
-
-    # Rest of installation logic...
+    fi
 }
 
 # --- Node Initialization ---
 init_node() {
     local node_id="$1"
     local node_dir="$NODE_BASE_DIR/node-$node_id"
+    local port=$((BASE_PORT + node_id))
+
+    log "INFO" "Initializing node $node_id (Port: $port)"
     
-    echo "Initializing node $node_id..."
-    mkdir -p "$node_dir" || exit 1
-    change_directory "$node_dir"
+    safe_create_dir "$node_dir"
     
-    # Node initialization logic...
+    # Simulate node initialization
+    if ! touch "$node_dir/config.json"; then
+        log "ERROR" "Failed to create node configuration"
+        exit 1
+    fi
 }
 
-# --- Main Execution ---
+# --- Main Installation ---
 main() {
-    # Clean log file
-    > "$LOG_FILE"
+    trap cleanup ERR
     
-    # Start installation
-    install_gaianet
+    log "INFO" "Starting GaiaNet installation"
     
-    # Initialize nodes
-    for node_id in {1..3}; do
+    # System checks
+    check_dependencies
+    safe_create_dir "$INSTALL_DIR"
+    touch "$LOG_FILE" || {
+        log "ERROR" "Failed to create log file"
+        exit 1
+    }
+
+    # Repository setup
+    if [ -d "$REPO_DIR" ]; then
+        log "WARN" "Repository directory already exists, removing..."
+        rm -rf "$REPO_DIR"
+    fi
+    clone_repository
+
+    # Node initialization
+    for ((node_id=1; node_id<=NODE_COUNT; node_id++)); do
         init_node "$node_id"
     done
-    
-    echo "Installation completed successfully!"
-    echo "Details logged to: $LOG_FILE"
+
+    log "INFO" "Installation completed successfully"
+    log "INFO" "Installation directory: $INSTALL_DIR"
+    log "INFO" "Log file: $LOG_FILE"
 }
 
-# Run main function
+# --- Execution ---
 main "$@"
