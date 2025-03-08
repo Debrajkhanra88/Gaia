@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e  # Exit if any command fails
+set -e  # Exit on any command failure
 
 # --- Utility Functions ---
 log() {
@@ -14,7 +14,7 @@ check_root() {
     fi
 }
 
-# --- Install Missing Packages ---
+# --- Install Missing Dependencies ---
 install_dependencies() {
     log "🔍 Checking and installing required packages..."
     
@@ -24,7 +24,6 @@ install_dependencies() {
     # List of essential packages
     local packages=("curl" "git" "screen" "jq" "python3-pip" "iproute2")
 
-    # Install missing packages
     for pkg in "${packages[@]}"; do
         if ! dpkg -l | grep -qw "$pkg"; then
             log "⚙️ Installing $pkg..."
@@ -33,29 +32,20 @@ install_dependencies() {
     done
 }
 
-# --- System Requirements Check ---
+# --- System Checks ---
 check_system_requirements() {
     log "🔍 Checking system requirements..."
     
-    # Check memory
-    local mem_available=$(awk '/MemTotal/ {print $2/1024/1024}' /proc/meminfo | awk '{print int($1+0.5)}')  # Round to nearest GB
-    
+    local mem_available=$(awk '/MemTotal/ {print $2/1024/1024}' /proc/meminfo | awk '{print int($1+0.5)}')
     if [ "$mem_available" -lt 16 ]; then
         log "⚠️ Warning: Only ${mem_available}GB RAM available. Some models may not run efficiently."
-        local max_nodes=$((mem_available / 5))  # Approximate 5GB RAM per node
-        if [ "$max_nodes" -lt 1 ]; then
-            max_nodes=1  # Ensure at least 1 node can run
-        fi
-        log "⚠️ Recommended: Run a maximum of $max_nodes node(s)."
     fi
 
-    # Check disk space
     local disk_available=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
     if [ "$disk_available" -lt 50 ]; then
         log "⚠️ Warning: Only ${disk_available}GB free disk space. 50GB is recommended."
     fi
 
-    # Check ports availability using 'ss' instead of 'netstat'
     for port in {8080..8083}; do
         if ss -tuln | grep -q ":$port "; then
             log "❌ Port $port is already in use"
@@ -64,10 +54,10 @@ check_system_requirements() {
     done
 }
 
-# --- GPU Detection and Setup ---
+# --- GPU Detection ---
 detect_gpu() {
     if ! command -v nvidia-smi &>/dev/null; then
-        log "❌ nvidia-smi not found. Running in CPU mode."
+        log "❌ No NVIDIA GPU found. Running in CPU mode."
         return 1
     fi
 
@@ -88,29 +78,17 @@ detect_gpu() {
 
 install_gpu_dependencies() {
     log "🛠️ Installing GPU dependencies..."
-    apt install -y nvidia-driver-535 cuda-toolkit-12-2 || {
-        log "❌ Failed to install GPU dependencies"
-        exit 1
-    }
-    pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 || {
-        log "❌ Failed to install PyTorch"
-        exit 1
-    }
+    apt install -y nvidia-driver-535 cuda-toolkit-12-2 || exit 1
+    pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 || exit 1
 }
 
 install_cpu_dependencies() {
     log "🛠️ Installing CPU dependencies..."
-    apt install -y libopenblas-dev libmkl-dev || {
-        log "❌ Failed to install CPU dependencies"
-        exit 1
-    }
-    pip3 install torch torchvision torchaudio || {
-        log "❌ Failed to install PyTorch"
-        exit 1
-    }
+    apt install -y libopenblas-dev libmkl-dev || exit 1
+    pip3 install torch torchvision torchaudio || exit 1
 }
 
-# --- Node Management ---
+# --- Node Setup ---
 init_node() {
     local node_num="$1"
     local config_url="$2"
@@ -120,7 +98,7 @@ init_node() {
     
     mkdir -p "$node_dir"
     cd "$node_dir" || exit 1
-    
+
     if ! curl -s "$config_url" | jq empty; then
         log "❌ Invalid JSON configuration at $config_url"
         return 1
@@ -183,8 +161,9 @@ main() {
     echo "4) Phi-2 (2.7B) - Best for CPU Servers"
     echo "5) LLaMA 2 (7B) - CPU Optimized"
     echo "6) TinyLLaMA (1.1B) - Ultra-lightweight CPU Model"
-    
+
     read -rp "Enter the number of your choice: " model_choice
+    log "✅ Selected Model: $model_choice"
 
     if [[ ! ${model_configs[$model_choice]} ]]; then
         log "❌ Invalid model choice"
@@ -194,7 +173,12 @@ main() {
     local config_url="${model_configs[$model_choice]}"
 
     for i in {1..3}; do
-        init_node "$i" "$config_url" && start_node "$i"
+        log "🚀 Setting up node $i..."
+        if init_node "$i" "$config_url"; then
+            start_node "$i"
+        else
+            log "❌ Skipping node $i due to an error."
+        fi
     done
 
     log "✅ GaiaNet nodes setup completed"
