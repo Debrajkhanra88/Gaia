@@ -1,302 +1,241 @@
 #!/bin/bash
 
-set -e  # Exit on any error
+set -euo pipefail  # More strict error handling
 
-# --- Utility Functions ---
+# --- Configuration Variables ---
+declare -A MODEL_CONFIGS=(
+    ["LLaMA3-8B"]="https://example.com/configs/llama3-8b.json"
+    ["Mistral-7B"]="https://example.com/configs/mistral-7b.json"
+    # Add other models as needed
+)
+DEFAULT_NODES=3
+MIN_MEMORY=16  # GB
+MIN_DISK=50    # GB
+BASE_PORT=8080
+INSTALL_DIR="$HOME/gaianet"
+LOG_FILE="/var/log/gaianet_setup.log"
+
+# --- Enhanced Logging ---
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
+    local level="$1"
+    local message="$2"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - [$level] - $message" | tee -a "$LOG_FILE"
 }
 
+# --- Root Check ---
 check_root() {
     if [ "$EUID" -ne 0 ]; then 
-        log "❌ Please run as root or with sudo"
+        log "ERROR" "This script must be run as root. Use sudo or switch to root user."
         exit 1
     fi
 }
 
-# --- System Requirements Check ---
-check_system_requirements() {
-    log "🔍 Checking system requirements..."
+# --- Dependency Checks ---
+check_dependencies() {
+    local deps=("curl" "git" "jq" "lsof" "free" "df")
+    local missing=()
     
-    # Check memory (16GB minimum)
-    local mem_available=$(free -g | awk '/^Mem:/{print $2}')
-    if [ "$mem_available" -lt 16 ]; then
-        log "❌ Insufficient memory: ${mem_available}GB available, 16GB required"
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &>/dev/null; then
+            missing+=("$dep")
+        fi
+    done
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        log "ERROR" "Missing required dependencies: ${missing[*]}"
+        exit 1
+    fi
+}
+
+# --- System Validation ---
+validate_system() {
+    log "INFO" "Validating system requirements..."
+    
+    # Memory Check
+    local mem_total
+    mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    mem_total=$((mem_total / 1024 / 1024))
+    
+    if [ "$mem_total" -lt "$MIN_MEMORY" ]; then
+        log "ERROR" "Insufficient memory: ${mem_total}GB available, ${MIN_MEMORY}GB required"
         exit 1
     fi
 
-    # Check disk space (50GB minimum)
-    local disk_available=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-    if [ "$disk_available" -lt 50 ]; then
-        log "❌ Insufficient disk space: ${disk_available}GB available, 50GB required"
+    # Disk Check
+    local disk_avail
+    disk_avail=$(df -BG --output=avail "$INSTALL_DIR" | tail -1 | sed 's/G//')
+    if [ "$disk_avail" -lt "$MIN_DISK" ]; then
+        log "ERROR" "Insufficient disk space in $INSTALL_DIR: ${disk_avail}GB available, ${MIN_DISK}GB required"
         exit 1
     fi
 
-    # Check ports availability
-    for port in {8080..8083}; do
-        if netstat -tuln | grep -q ":$port "; then
-            log "❌ Port $port is already in use"
+    # Port Check
+    for ((port=BASE_PORT; port<BASE_PORT+DEFAULT_NODES; port++)); do
+        if lsof -i :"$port" &>/dev/null; then
+            log "ERROR" "Port $port is already in use"
             exit 1
         fi
     done
 }
 
-# --- GPU Detection and Setup ---
-detect_gpu() {
-    if ! command -v nvidia-smi &>/dev/null; then
-        log "❌ nvidia-smi not found"
-        return 1
-    fi
-
+# --- GPU Setup ---
+setup_gpu() {
     if ! nvidia-smi &>/dev/null; then
-        log "❌ nvidia-smi failed to run"
+        log "WARNING" "NVIDIA GPU not detected or drivers not installed"
         return 1
     fi
 
-    local gpu_count=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader | wc -l)
-    if [ "$gpu_count" -eq 0 ]; then
-        log "❌ No NVIDIA GPUs detected"
-        return 1
-    fi
-
-    log "✅ Found $gpu_count NVIDIA GPU(s)"
-    return 0
-}
-
-install_gpu_dependencies() {
-    log "🛠️ Installing GPU dependencies..."
-    
-    # Add NVIDIA repository
-    if ! grep -q "nvidia-driver-535" /etc/apt/sources.list.d/* 2>/dev/null; then
-        add-apt-repository ppa:graphics-drivers/ppa -y
-    fi
-
+    log "INFO" "Detected NVIDIA GPU(s)"
     # Install NVIDIA drivers and CUDA
-    apt update
-    apt install -y nvidia-driver-535 || {
-        log "❌ Failed to install NVIDIA drivers"
-        exit 1
-    }
-
-    # Install CUDA Toolkit
-    wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-ubuntu2204.pin
-    mv cuda-ubuntu2204.pin /etc/apt/preferences.d/cuda-repository-pin-600
-    wget https://developer.download.nvidia.com/compute/cuda/12.2.0/local_installers/cuda-repo-ubuntu2204-12-2-local_12.2.0-535.54.03-1_amd64.deb
-    dpkg -i cuda-repo-ubuntu2204-12-2-local_12.2.0-535.54.03-1_amd64.deb
-    cp /var/cuda-repo-ubuntu2204-12-2-local/cuda-*-keyring.gpg /usr/share/keyrings/
-    apt update
-    apt install -y cuda-toolkit-12-2 || {
-        log "❌ Failed to install CUDA Toolkit"
-        exit 1
-    }
-
-    # Install PyTorch with CUDA support
-    pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 || {
-        log "❌ Failed to install PyTorch"
-        exit 1
-    }
-}
-
-install_cpu_dependencies() {
-    log "🛠️ Installing CPU dependencies..."
-    apt update
-    apt install -y libopenblas-dev libmkl-dev python3-pip || {
-        log "❌ Failed to install CPU dependencies"
-        exit 1
-    }
+    # Consider using a driver version from the system's package manager
+    # Add secure repository configuration
+    add-apt-repository -y ppa:graphics-drivers/ppa
+    apt-get update
+    apt-get install -y nvidia-driver-535 nvidia-cuda-toolkit
     
-    pip3 install torch torchvision torchaudio || {
-        log "❌ Failed to install PyTorch"
-        exit 1
-    }
+    # Verify installation
+    if ! nvidia-smi; then
+        log "ERROR" "NVIDIA driver installation failed"
+        return 1
+    fi
 }
 
 # --- Node Management ---
-validate_config() {
-    local config_url="$1"
-    if ! curl -s "$config_url" | jq empty; then
-        log "❌ Invalid JSON configuration at $config_url"
-        return 1
-    fi
-    return 0
-}
-
 init_node() {
-    local node_num="$1"
+    local node_id="$1"
     local config_url="$2"
-    local node_dir="$HOME/gaianet_node_$node_num"
+    local node_dir="$INSTALL_DIR/nodes/node-$node_id"
+    local config_file="$node_dir/config.json"
 
-    log "🔧 Initializing node $node_num..."
+    log "INFO" "Initializing node $node_id in $node_dir"
     
     mkdir -p "$node_dir"
-    cd "$node_dir" || exit 1
     
-    if ! validate_config "$config_url"; then
-        log "❌ Failed to validate config for node $node_num"
+    # Secure download with certificate verification
+    if ! curl -fsSL --retry 3 --cacert /etc/ssl/certs/ca-certificates.crt "$config_url" -o "$config_file"; then
+        log "ERROR" "Failed to download configuration for node $node_id"
         return 1
     fi
 
-    if ! ~/gaianet/bin/gaianet init --config "$config_url"; then
-        log "❌ Failed to initialize node $node_num"
+    if ! jq empty "$config_file"; then
+        log "ERROR" "Invalid JSON configuration for node $node_id"
         return 1
     fi
 
-    return 0
+    # Initialize node using the configuration
+    "$INSTALL_DIR/bin/gaianet" init --config "$config_file" --data-dir "$node_dir" || {
+        log "ERROR" "Node $node_id initialization failed"
+        return 1
+    }
 }
 
 start_node() {
-    local node_num="$1"
-    local port=$((8080 + node_num))
-    local node_dir="$HOME/gaianet_node_$node_num"
-
-    log "🚀 Starting node $node_num on port $port..."
-    screen -dmS "gaianet_node_$node_num" ~/gaianet/bin/gaianet start \
-        --port="$port" \
-        --data-dir="$node_dir" || {
-        log "❌ Failed to start node $node_num"
+    local node_id="$1"
+    local port=$((BASE_PORT + node_id))
+    local node_dir="$INSTALL_DIR/nodes/node-$node_id"
+    
+    log "INFO" "Starting node $node_id on port $port"
+    systemctl start gaianet-node@"$node_id".service || {
+        log "ERROR" "Failed to start node $node_id"
         return 1
     }
-    return 0
 }
 
-# --- Main Script ---
-main() {
-    check_root
-    check_system_requirements
-
-    # Install base dependencies
-    apt install -y curl git screen jq || exit 1
-
-    # GPU/CPU setup
-    if detect_gpu; then
-        install_gpu_dependencies
-    else
-        install_cpu_dependencies
-    fi
-
-    # Clone GaiaNet repository
-    log "📥 Cloning GaiaNet repository..."
-    rm -rf ~/Gaia
-    git clone https://github.com/Debrajkhanra88/Gaia.git ~/Gaia || exit 1
-    cd ~/Gaia || exit 1
-    chmod +x *.sh
-
-    # Model selection menu
-    declare -A model_configs=(
-        ["1"]="https://raw.githubusercontent.com/GaiaNet-AI/node-configs/main/llama-3.1-8b-instruct/config.json"
-        ["2"]="https://raw.githubusercontent.com/GaiaNet-AI/node-configs/main/mistral-7b-instruct/config.json"
-        ["3"]="https://raw.githubusercontent.com/GaiaNet-AI/node-configs/main/mixtral-12.7b/config.json"
-        ["4"]="https://raw.githubusercontent.com/GaiaNet-AI/node-configs/main/phi-2/config.json"
-        ["5"]="https://raw.githubusercontent.com/GaiaNet-AI/node-configs/main/llama-2-7b-cpu/config.json"
-        ["6"]="https://raw.githubusercontent.com/GaiaNet-AI/node-configs/main/tiny-llama-1b/config.json"
-    )
-
-    echo "🚀 Select the AI Model to Install:"
-    echo "1) LLaMA 3 (8B) - Best for GPU Servers"
-    echo "2) Mistral 7B - Mid-range GPUs (Tesla T4, 3090)"
-    echo "3) Mixtral 12.7B - High-end GPUs (A100, H100)"
-    echo "4) Phi-2 (2.7B) - Best for CPU Servers"
-    echo "5) LLaMA 2 (7B) - CPU Optimized"
-    echo "6) TinyLLaMA (1.1B) - Ultra-lightweight CPU Model"
+# --- Systemd Service Setup ---
+setup_systemd() {
+    log "INFO" "Configuring systemd services"
     
-    read -rp "Enter the number of your choice: " model_choice
+    cat > /etc/systemd/system/gaianet-node@.service <<EOF
+[Unit]
+Description=GaiaNet Node %i
+After=network.target
 
-    if [[ ! ${model_configs[$model_choice]} ]]; then
-        log "❌ Invalid model choice"
-        exit 1
+[Service]
+User=gaianet
+Group=gaianet
+WorkingDirectory=$INSTALL_DIR/nodes/node-%i
+ExecStart=$INSTALL_DIR/bin/gaianet start \\
+    --port=$((BASE_PORT + %i)) \\
+    --data-dir=$INSTALL_DIR/nodes/node-%i
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+}
+
+# --- Main Installation ---
+install_gaianet() {
+    check_root
+    check_dependencies
+    validate_system
+
+    # Create dedicated user
+    if ! id gaianet &>/dev/null; then
+        useradd -r -s /usr/sbin/nologin -d "$INSTALL_DIR" gaianet
     fi
 
-    local config_url="${model_configs[$model_choice]}"
+    # Clone repository
+    if [ ! -d "$INSTALL_DIR" ]; then
+        git clone https://github.com/GaiaNet-AI/core.git "$INSTALL_DIR" || {
+            log "ERROR" "Failed to clone repository"
+            exit 1
+        }
+    fi
 
-    # Initialize and start nodes
-    for i in {1..3}; do
-        if ! init_node "$i" "$config_url"; then
-            log "❌ Failed to initialize node $i"
-            continue
-        fi
-        if ! start_node "$i"; then
-            log "❌ Failed to start node $i"
-            continue
-        fi
+    # GPU setup
+    if setup_gpu; then
+        log "INFO" "Installing GPU-optimized dependencies"
+        pip install -r "$INSTALL_DIR/requirements-gpu.txt"
+    else
+        log "INFO" "Installing CPU-only dependencies"
+        pip install -r "$INSTALL_DIR/requirements-cpu.txt"
+    fi
+
+    # Initialize nodes
+    for ((node_id=1; node_id<=DEFAULT_NODES; node_id++)); do
+        init_node "$node_id" "${MODEL_CONFIGS[$SELECTED_MODEL]}" || {
+            log "ERROR" "Aborting installation due to node initialization failure"
+            exit 1
+        }
     done
 
-    log "✅ GaiaNet nodes setup completed"
+    setup_systemd
 
-    # Node management menu
+    # Start nodes
+    for ((node_id=1; node_id<=DEFAULT_NODES; node_id++)); do
+        start_node "$node_id"
+    done
+
+    log "SUCCESS" "GaiaNet installation completed successfully"
+}
+
+# --- User Interface ---
+select_model() {
+    echo "Available AI Models:"
+    local i=1
+    for model in "${!MODEL_CONFIGS[@]}"; do
+        echo "$i) $model"
+        ((i++))
+    done
+
     while true; do
-        echo "==================================="
-        echo "🔍 GaiaNet Node Management Menu"
-        echo "1) 🌍 Check Node Info"
-        echo "2) 🚀 Start Node"
-        echo "3) ⛔ Stop Node"
-        echo "4) 🔄 Restart All Nodes"
-        echo "5) ✅ Check Running Nodes"
-        echo "6) 🔗 Attach to Node Session"
-        echo "7) ❌ Exit"
-        echo "==================================="
-
-        read -rp "Enter your choice: " option
-        case $option in
-            1)
-                for i in {1..3}; do
-                    echo "🔹 Node $i Info:"
-                    ~/gaianet/bin/gaianet info --data-dir=~/gaianet_node_$i
-                    echo "---------------------------------"
-                done
-                ;;
-            2)
-                read -rp "Enter Node Number (1-3): " node_number
-                if [[ "$node_number" =~ ^[1-3]$ ]]; then
-                    start_node "$node_number"
-                else
-                    log "❌ Invalid node number"
-                fi
-                ;;
-            3)
-                read -rp "Enter Node Number (1-3): " node_number
-                if [[ "$node_number" =~ ^[1-3]$ ]]; then
-                    screen -S "gaianet_node_$node_number" -X quit
-                    log "⛔ Stopped node $node_number"
-                else
-                    log "❌ Invalid node number"
-                fi
-                ;;
-            4)
-                log "🔄 Restarting all nodes..."
-                for i in {1..3}; do
-                    screen -S "gaianet_node_$i" -X quit 2>/dev/null
-                    start_node "$i"
-                done
-                log "✅ All nodes restarted"
-                ;;
-            5)
-                log "✅ Running nodes:"
-                screen -ls | grep "gaianet_node_" || log "No nodes running"
-                ;;
-            6)
-                read -rp "Enter Node Number (1-3): " node_number
-                if [[ "$node_number" =~ ^[1-3]$ ]]; then
-                    screen -r "gaianet_node_$node_number"
-                else
-                    log "❌ Invalid node number"
-                fi
-                ;;
-            7)
-                log "👋 Exiting..."
-                break
-                ;;
-            *)
-                log "❌ Invalid choice"
-                ;;
-        esac
+        read -rp "Select model (1-${#MODEL_CONFIGS[@]}): " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#MODEL_CONFIGS[@]}" ]; then
+            SELECTED_MODEL=$(printf "%s\n" "${!MODEL_CONFIGS[@]}" | sed -n "${choice}p")
+            break
+        fi
+        echo "Invalid selection. Please try again."
     done
 }
 
-# --- Script Entry Point ---
-if [[ $# -gt 0 ]]; then
-    log "🔄 Starting node with parameters: $@"
-    exec ~/gaianet/bin/gaianet start "$@"
-    exit 0
-fi
+# --- Entry Point ---
+main() {
+    select_model
+    install_gaianet
+}
 
-main
+main "$@"
