@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e  # Exit on any error
+set -e  # Exit if any command fails
 
 # --- Utility Functions ---
 log() {
@@ -12,6 +12,25 @@ check_root() {
         log "❌ Please run as root or with sudo"
         exit 1
     fi
+}
+
+# --- Install Missing Packages ---
+install_dependencies() {
+    log "🔍 Checking and installing required packages..."
+    
+    # Update package lists
+    apt update
+
+    # List of essential packages
+    local packages=("curl" "git" "screen" "jq" "python3-pip" "iproute2")
+
+    # Install missing packages
+    for pkg in "${packages[@]}"; do
+        if ! dpkg -l | grep -qw "$pkg"; then
+            log "⚙️ Installing $pkg..."
+            apt install -y "$pkg"
+        fi
+    done
 }
 
 # --- System Requirements Check ---
@@ -69,7 +88,6 @@ detect_gpu() {
 
 install_gpu_dependencies() {
     log "🛠️ Installing GPU dependencies..."
-    apt update
     apt install -y nvidia-driver-535 cuda-toolkit-12-2 || {
         log "❌ Failed to install GPU dependencies"
         exit 1
@@ -82,8 +100,7 @@ install_gpu_dependencies() {
 
 install_cpu_dependencies() {
     log "🛠️ Installing CPU dependencies..."
-    apt update
-    apt install -y libopenblas-dev libmkl-dev python3-pip || {
+    apt install -y libopenblas-dev libmkl-dev || {
         log "❌ Failed to install CPU dependencies"
         exit 1
     }
@@ -135,9 +152,8 @@ start_node() {
 # --- Main Script ---
 main() {
     check_root
+    install_dependencies
     check_system_requirements
-
-    apt install -y curl git screen jq || exit 1
 
     if detect_gpu; then
         install_gpu_dependencies
@@ -185,7 +201,6 @@ main() {
 }
 
 if [[ $# -gt 0 ]]; then
-    log "🔄 Starting node with parameters: $@"
     exec ~/gaianet/bin/gaianet start "$@"
     exit 0
 fi
