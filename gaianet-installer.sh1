@@ -1,0 +1,170 @@
+#!/bin/bash
+
+set -e  # Exit on error
+
+# --- Utility Functions ---
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
+}
+
+check_root() {
+    if [ "$EUID" -ne 0 ]; then 
+        log "❌ Please run as root or with sudo"
+        exit 1
+    fi
+}
+
+install_missing_packages() {
+    local packages=("curl" "git" "screen" "jq" "net-tools" "wget" "python3-pip")
+    
+    for pkg in "${packages[@]}"; do
+        if ! dpkg -l | grep -qw "$pkg"; then
+            log "📦 Installing missing package: $pkg"
+            apt install -y "$pkg"
+        fi
+    done
+}
+
+# --- System Requirements Check ---
+check_system_requirements() {
+    log "🔍 Checking system requirements..."
+    
+    local mem_available=$(free -g | awk '/^Mem:/{print $2}')
+    if [ "$mem_available" -lt 16 ]; then
+        log "⚠️ Warning: System has only ${mem_available}GB RAM. Some models may not work efficiently."
+    fi
+
+    local disk_available=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
+    if [ "$disk_available" -lt 50 ]; then
+        log "⚠️ Warning: System has only ${disk_available}GB disk space. Some models may not work efficiently."
+    fi
+
+    # Check if ports are available
+    for port in {8080..8083}; do
+        if netstat -tuln | grep -q ":$port "; then
+            log "❌ Port $port is already in use. Please free up required ports."
+            exit 1
+        fi
+    done
+}
+
+# --- GPU Detection ---
+detect_gpu() {
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        local gpu_count=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader | wc -l)
+        if [ "$gpu_count" -gt 0 ]; then
+            log "✅ Found $gpu_count NVIDIA GPU(s)"
+            return 0
+        fi
+    fi
+    log "⚠️ No NVIDIA GPU detected. Running in CPU mode."
+    return 1
+}
+
+install_gpu_dependencies() {
+    log "🛠️ Installing NVIDIA drivers and CUDA..."
+
+    add-apt-repository ppa:graphics-drivers/ppa -y
+    apt update
+    apt install -y nvidia-driver-535 cuda-toolkit-12-2
+
+    log "🛠️ Installing PyTorch with CUDA support..."
+    pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+}
+
+install_cpu_dependencies() {
+    log "🛠️ Installing CPU dependencies..."
+    apt update
+    apt install -y libopenblas-dev libmkl-dev python3-pip
+    pip3 install torch torchvision torchaudio
+}
+
+# --- Model Selection ---
+select_model() {
+    declare -A model_configs=(
+        ["1"]="https://raw.githubusercontent.com/GaiaNet-AI/node-configs/main/llama-3.1-8b-instruct/config.json"
+        ["2"]="https://raw.githubusercontent.com/GaiaNet-AI/node-configs/main/mistral-7b-instruct/config.json"
+        ["3"]="https://raw.githubusercontent.com/GaiaNet-AI/node-configs/main/mixtral-12.7b/config.json"
+        ["4"]="https://raw.githubusercontent.com/GaiaNet-AI/node-configs/main/phi-2/config.json"
+        ["5"]="https://raw.githubusercontent.com/GaiaNet-AI/node-configs/main/llama-2-7b-cpu/config.json"
+        ["6"]="https://raw.githubusercontent.com/GaiaNet-AI/node-configs/main/tiny-llama-1b/config.json"
+    )
+
+    echo "🚀 Select the AI Model to Install:"
+    echo "1) LLaMA 3 (8B) - Best for GPU Servers"
+    echo "2) Mistral 7B - Mid-range GPUs (Tesla T4, 3090)"
+    echo "3) Mixtral 12.7B - High-end GPUs (A100, H100)"
+    echo "4) Phi-2 (2.7B) - Best for CPU Servers"
+    echo "5) LLaMA 2 (7B) - CPU Optimized"
+    echo "6) TinyLLaMA (1.1B) - Ultra-lightweight CPU Model"
+
+    read -rp "Enter the number of your choice: " model_choice
+
+    if [[ ! ${model_configs[$model_choice]} ]]; then
+        log "❌ Invalid model choice"
+        exit 1
+    fi
+
+    config_url="${model_configs[$model_choice]}"
+    log "✅ Selected model: $config_url"
+}
+
+# --- Installation Type Selection ---
+select_installation_type() {
+    echo "🔧 Select Installation Type:"
+    echo "1) Install Gaia-Node (VPS/Non-GPU)"
+    echo "2) Install Gaia-Node (Laptop NVIDIA GPU)"
+    echo "3) Install Gaia-Node (Desktop NVIDIA GPU)"
+
+    read -rp "Enter your choice: " install_type
+
+    case "$install_type" in
+        1) log "✅ Installing Gaia-Node for VPS (Non-GPU) using $config_url" ;;
+        2) log "✅ Installing Gaia-Node for Laptop NVIDIA GPU using $config_url" ;;
+        3) log "✅ Installing Gaia-Node for Desktop NVIDIA GPU using $config_url" ;;
+        *) log "❌ Invalid choice" && exit 1 ;;
+    esac
+}
+
+# --- Install and Start Gaia Node ---
+install_gaia_node() {
+    log "📥 Cloning Gaia repository..."
+    rm -rf ~/Gaia
+    git clone https://github.com/Debrajkhanra88/Gaia.git ~/Gaia
+    cd ~/Gaia || exit 1
+    chmod +x *.sh
+
+    for i in {1..3}; do
+        local node_dir="$HOME/gaianet_node_$i"
+        mkdir -p "$node_dir"
+        cd "$node_dir" || exit 1
+
+        log "🔧 Initializing node $i..."
+        ~/Gaia/bin/gaianet init --config "$config_url"
+
+        local port=$((8080 + i))
+        log "🚀 Starting node $i on port $port..."
+        screen -dmS "gaianet_node_$i" ~/Gaia/bin/gaianet start --port="$port" --data-dir="$node_dir"
+    done
+
+    log "✅ GaiaNet nodes setup completed!"
+}
+
+# --- Main Execution ---
+main() {
+    check_root
+    install_missing_packages
+    check_system_requirements
+    select_model
+    select_installation_type
+
+    if detect_gpu; then
+        install_gpu_dependencies
+    else
+        install_cpu_dependencies
+    fi
+
+    install_gaia_node
+}
+
+main
